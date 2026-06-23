@@ -114,55 +114,59 @@ app.get('/api/units', async (req, res) => {
 });
 
 // --- ENDPOINT: dane gminy ---
-// GET /api/gmina/:id  — populacja, bezrobocie, REGON z BDL
+// GET /api/gmina/:id
 app.get('/api/gmina/:id', async (req, res) => {
   const { id } = req.params;
 
-  // Walidacja ID (12 cyfr)
   if (!/^\d{12}$/.test(id)) {
     return res.status(400).json({ error: 'Nieprawidłowe ID gminy' });
   }
 
   try {
-    // Cache danych gminy
     const cached = cache.data.get(id);
     if (cached && Date.now() < cached.expiry) {
-      console.log(`Cache hit: ${id}`);
       return res.json(cached.data);
     }
 
-    // Zmienne BDL dla poziomu gminy (level 6)
-    // 72305 = ludność ogółem (działa na każdym poziomie)
-    // 461695 = bezrobotni zarejestrowani ogółem (gminy)
-    // 64428 = podmioty REGON ogółem
-    // 461696 = bezrobotni zarejestrowani kobiety
-    const VARS = [72305, 461695, 64428];
+    // Candidaci zmiennych BDL dla poziomu gminy (level 6)
+    // Próbujemy szeroki zestaw — GUS ignoruje te których nie ma
+    const VAR_CANDIDATES = [
+      72305,   // ludność ogółem ✓ (zweryfikowane)
+      461695,  // bezrobotni zarejestrowani ogółem
+      461696,  // bezrobotni zarejestrowani kobiety
+      64428,   // podmioty REGON ogółem
+      60270,   // stopa bezrobocia (poziom powiat/woj)
+      2137,    // ludność wg płci
+      456986,  // urodzenia żywe
+      456987,  // zgony
+      148190,  // saldo migracji
+      910268,  // dochody własne gminy na mieszkańca
+      910269,  // wydatki gminy na mieszkańca
+    ];
 
-    // Pobierz dane dla każdej zmiennej osobno (GUS może ignorować wiele var-id naraz)
     const results = [];
-    for (const varId of VARS) {
+    // Grupuj po 5 zmiennych na request żeby zmniejszyć liczbę requestów
+    const CHUNK = 5;
+    for (let i = 0; i < VAR_CANDIDATES.length; i += CHUNK) {
+      const chunk = VAR_CANDIDATES.slice(i, i + CHUNK);
+      const varQuery = chunk.map(v => `var-id=${v}`).join('&');
       try {
-        const url = `/data/by-unit/${id}?var-id=${varId}&format=json&lang=pl`;
-        console.log(`Fetching: ${url}`);
-        const data = await gusGet(url);
-        console.log(`  → unitName: "${data.unitName}", results: ${data.results?.length || 0}`);
+        const data = await gusGet(`/data/by-unit/${id}?${varQuery}&format=json&lang=pl`);
         if (data.results && data.results.length > 0) {
           results.push(...data.results);
+          console.log(`  chunk ${i}-${i+CHUNK}: znaleziono ${data.results.length} zmiennych (${data.results.map(r => r.id).join(',')})`);
         }
       } catch (e) {
-        console.warn(`  Zmienna ${varId} niedostępna: ${e.message}`);
+        console.warn(`  chunk ${i}-${i+CHUNK} błąd: ${e.message}`);
       }
     }
 
-    const combined = {
-      unitId: id,
-      results,
-    };
+    console.log(`Gmina ${id}: łącznie ${results.length} zmiennych`);
 
-    // Zapisz w cache
+    const combined = { unitId: id, results };
     cache.data.set(id, { data: combined, expiry: Date.now() + DATA_TTL });
-
     res.json(combined);
+
   } catch (err) {
     console.error(`Błąd /api/gmina/${id}:`, err.message);
     res.status(500).json({ error: err.message });
