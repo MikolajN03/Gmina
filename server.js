@@ -127,23 +127,42 @@ app.get('/api/gmina/:id', async (req, res) => {
     // Cache danych gminy
     const cached = cache.data.get(id);
     if (cached && Date.now() < cached.expiry) {
+      console.log(`Cache hit: ${id}`);
       return res.json(cached.data);
     }
 
-    // Zmienne BDL które nas interesują
-    const VARS = [
-      72305,  // ludność ogółem
-      60270,  // stopa bezrobocia rejestrowanego
-      64428,  // podmioty gospodarcze REGON
-    ];
+    // Zmienne BDL dla poziomu gminy (level 6)
+    // 72305 = ludność ogółem (działa na każdym poziomie)
+    // 461695 = bezrobotni zarejestrowani ogółem (gminy)
+    // 64428 = podmioty REGON ogółem
+    // 461696 = bezrobotni zarejestrowani kobiety
+    const VARS = [72305, 461695, 64428];
 
-    const varQuery = VARS.map(v => `var-id=${v}`).join('&');
-    const data = await gusGet(`/data/by-unit/${id}?${varQuery}&format=json&lang=pl`);
+    // Pobierz dane dla każdej zmiennej osobno (GUS może ignorować wiele var-id naraz)
+    const results = [];
+    for (const varId of VARS) {
+      try {
+        const url = `/data/by-unit/${id}?var-id=${varId}&format=json&lang=pl`;
+        console.log(`Fetching: ${url}`);
+        const data = await gusGet(url);
+        console.log(`  → unitName: "${data.unitName}", results: ${data.results?.length || 0}`);
+        if (data.results && data.results.length > 0) {
+          results.push(...data.results);
+        }
+      } catch (e) {
+        console.warn(`  Zmienna ${varId} niedostępna: ${e.message}`);
+      }
+    }
+
+    const combined = {
+      unitId: id,
+      results,
+    };
 
     // Zapisz w cache
-    cache.data.set(id, { data, expiry: Date.now() + DATA_TTL });
+    cache.data.set(id, { data: combined, expiry: Date.now() + DATA_TTL });
 
-    res.json(data);
+    res.json(combined);
   } catch (err) {
     console.error(`Błąd /api/gmina/${id}:`, err.message);
     res.status(500).json({ error: err.message });
